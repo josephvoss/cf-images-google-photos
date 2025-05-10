@@ -2,6 +2,11 @@ import { Router } from '@tsndr/cloudflare-worker-router'
 import { google, Auth } from 'googleapis';
 import * as jose from 'jose'
 
+// TODO
+// [?] Fix recursion in poller
+// [x] fetch full sized images
+// [?] set exif metadata to download
+
 export interface Env {
     // oauth secrets
     CLIENT_ID: string;
@@ -142,10 +147,12 @@ async function poller(
   // User still picking, poll again
   if (!resp.mediaItemsSet) {
     // Wait until pollInterval set
-    await new Promise(
-      r => setTimeout(r, parseInt(resp.pollingConfig.pollInterval))
-    );
-    return poller(resp, tokens, bucket)
+    console.log(`recursing in poller. Poll int: ${resp.pollingConfig.pollInterval}`)
+    return await new Promise(
+      // seconds to ms
+      r => setTimeout(r, parseInt(resp.pollingConfig.pollInterval) * 1000)
+      // This is hacky and I don't understand promises
+    ).then(async () => { await poller(resp, tokens, bucket) })
   }
 
   // User finished picking, run upload
@@ -192,6 +199,7 @@ async function fetchImages(
 
   output.push(...resp.mediaItems)
   if (resp.nextPageToken) {
+    console.log("recursing fetchimage")
     var mediaItems = await fetchImages(sess, resp.nextPageToken, tokens)
     output.push(...mediaItems)
   }
@@ -202,7 +210,7 @@ interface MediaFile {
   baseUrl: string,
   mimeType: string,
   filename: string,
-  //mediaFileMetadata": { object (MediaFileMetadata) }
+  mediaFileMetadata: { width: number, height: number }
 }
 
 enum MediaType {
@@ -228,11 +236,14 @@ async function uploadImagesToCF(
   tokens: Auth.Credentials,
 ) {
 
-  // TODO strip exif info
+  // TODO strip exif info - needed anymore?
   // https://github.com/joshbuddy/exif-be-gone
   // https://www.npmjs.com/package/exifr
   for (const mediaItem of mediaItems) {
-    const image = await fetch(mediaItem.mediaFile.baseUrl, {
+    const {width, height} = mediaItem.mediaFile.mediaFileMetadata
+    console.log(`fetching image ${mediaItem.mediaFile.filename}`)
+    const image = await fetch(
+      mediaItem.mediaFile.baseUrl + `=w${width}-h${height}-d`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${tokens.access_token}`,
@@ -245,19 +256,20 @@ async function uploadImagesToCF(
 }
 
 // Simple get
-router.get('/user', () => {
-    return Response.json({
-        id: 1,
-        name: 'John Doe'
-    })
-})
-router.get('/mk_session', () => {
+router.get('/', ({req}) => {
+  var url = new URL(req.url)
+  url.pathname = '/login'
 
-    return Response.json({
-        id: 1,
-        name: 'John Doe'
-    })
+  return new Response(`<!DOCTYPE html>
+<body>
+  <a href=${url.toString()}>Upload</a></body>
+</body>`, {
+    headers: {
+      "content-type": "text/html;charset=UTF-8",
+    },
+  })
 })
+
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
