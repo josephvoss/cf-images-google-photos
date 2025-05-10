@@ -6,10 +6,22 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "cf-images-google-photos",
 	"main": "src/index.ts",
+  "compatibility_flags": ["nodejs_compat"],
 	"compatibility_date": "2025-05-03",
 	"observability": {
 		"enabled": true
-	}
+	},
+  "vars": {
+    "ACCOUNT_ID": "56be52cce5bd4785a25e988f0e7d1170",
+    "AUD_TAG": "9a92ee74901f9b2cb3b1a184fb8b8cb8ec37f8d82623cba8fd054fe8760d30c3",
+    "TEAM_DOMAIN": "https://jvoss.cloudflareaccess.com"
+  },
+  "r2_buckets": [
+    {
+      "binding": "PHOTO_BUCKET",
+      "bucket_name": "luca-images"
+    }
+  ]
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
@@ -27,7 +39,7 @@
 	 * Environment Variables
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 */
-	// "vars": { "MY_VARIABLE": "production_value" },
+  //	"vars": { "account_id": "56be52cce5bd4785a25e988f0e7d1170" },
 	/**
 	 * Note: Use secrets to store sensitive data.
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
