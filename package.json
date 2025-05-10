@@ -11,7 +11,6 @@
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.19",
-		"@tsndr/cloudflare-worker-jwt": "^3.1.4",
 		"@tsndr/cloudflare-worker-router": "^3.2.10",
 		"@types/node": "^22.15.11",
 		"googleapis": "^148.0.0",

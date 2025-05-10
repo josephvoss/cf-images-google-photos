@@ -174,6 +174,7 @@ async function poller(
       retry: false,
     }
     console.log(`recursing in poller. Poll int: ${resp.pollingConfig.pollInterval}`)
+    console.log(`poll time: ${new Date().toISOString()}`)
     await updateSessionStatus(env, sessionStatus)
     // waiting on session
     return await new Promise(
@@ -291,9 +292,24 @@ async function uploadImagesToCF(
     });
     const bytes = await image.bytes();
 
+    const uploadSessionStatus = {
+      user: user,
+      text: `Uploading image ${mediaItem.mediaFile.filename}`,
+      finished: false,
+      retry: false,
+    }
+    await updateSessionStatus(env, uploadSessionStatus)
     await env.PHOTO_BUCKET.put(mediaItem.mediaFile.filename, bytes);
   }
+
   console.log("finished fetching all images") 
+  const uploadSessionStatus = {
+    user: user,
+    text: "Finished pushing image",
+    finished: true,
+    retry: false,
+  }
+  await updateSessionStatus(env, uploadSessionStatus)
 }
 
 // Custom type for updating session
@@ -307,14 +323,15 @@ interface SessionStatus {
 async function updateSessionStatus(
   env: Env, status: SessionStatus,
 ) {
-  console.log(`Will set status: ${status}`)
+  console.log(`Will set status: ${JSON.stringify(status)}`)
   await env.SESSION_KV.put(status.user, JSON.stringify(status))
 }
 
 router.get('/check_status', async ({req, env}) => {
+  console.log("Checking status")
   const payload = await checkJWTHeaders(env, req.headers)
   if (!payload.sub) {
-    return new Response("JWT doens't contain sub", { status: 403 })
+    return new Response("JWT doesn't contain sub", { status: 403 })
   }
 
   // could use `cf-access-authenticated-user-email` instead of jwt sub if I care
@@ -355,6 +372,7 @@ router.get('/', ({req, env}) => {
     },
   })
  */
+  console.log("Fetching index")
   return env.ASSETS.fetch('index.html')
 })
 
