@@ -21,6 +21,13 @@
       "binding": "PHOTO_BUCKET",
       "bucket_name": "luca-images"
     }
+  ],
+	"assets": { "directory": "./static/", "binding": "ASSETS" },
+  "kv_namespaces": [
+    {
+      "binding": "SESSION_KV",
+      "id": "c303a954cc304d3abd636e1b3a98fd02"
+    }
   ]
 	/**
 	 * Smart Placement

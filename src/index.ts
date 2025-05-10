@@ -6,6 +6,9 @@ import * as jose from 'jose'
 // [?] Fix recursion in poller
 // [x] fetch full sized images
 // [?] set exif metadata to download
+// [ ] how to handle motion pictures
+// [ ] err check or something in main resp page
+//     open picker in new tab?
 
 export interface Env {
     // oauth secrets
@@ -20,10 +23,13 @@ export interface Env {
 
     // Bindings
     PHOTO_BUCKET: R2Bucket;
+    ASSETS: Fetcher;
+    SESSION_KV: KVNamespace;
 }
 
 const GOOGLE_PHOTOPICKER_URL = "https://photospicker.googleapis.com"
 const REDIRECT_PATH = '/oauth_callback'
+const CF_JWT_HEADER = 'cf-access-jwt-assertion'
 
 // router init and types
 // Request Extension
@@ -36,25 +42,34 @@ export type ExtCtx = {
 }
 const router = new Router<Env, ExtCtx, ExtReq>()
 
-// global middleware auth check
-router.use( async ({ env, req }) => {
-
-  // The Application Audience (AUD) tag for your application
-  const CERTS_URL = `${env.TEAM_DOMAIN}/cdn-cgi/access/certs`;
-
-  const JWKS = jose.createRemoteJWKSet(new URL(CERTS_URL))
-  const token = req.headers.get('cf-access-jwt-assertion')
+async function checkJWTHeaders(env: Env, headers: Headers): Promise<jose.JWTPayload>{
+  const token = headers.get(CF_JWT_HEADER)
   if (!token) {
-    return new Response("Missing cf auth token", { status: 403 })
+    throw new Error("Missing cf auth token")
   }
+  const JWKS = jose.createRemoteJWKSet(new URL(
+    `${env.TEAM_DOMAIN}/cdn-cgi/access/certs`,
+  ))
   const result = await jose.jwtVerify(token, JWKS, {
     issuer: env.TEAM_DOMAIN,
     audience: env.AUD_TAG,
   })
-  if (result.payload.aud != env.AUD_TAG) {
-    return new Response("invalid jwt", {status: 403});
-  }
 
+  return result.payload
+}
+
+// global middleware auth check
+router.use( ({ env, req }) => {
+  return checkJWTHeaders(env, req.headers)
+    .then( (payload) => {
+      if (payload.aud != env.AUD_TAG) {
+        return new Response("middleware: invalid jwt", {status: 403});
+      }
+    }).catch((err) => {
+      return new Response(`middleware: unable to check jwt: ${err}`,
+        {status: 403},
+      );
+    })
 })
 
 // init google api client
@@ -90,7 +105,13 @@ router.get(REDIRECT_PATH, async ({env, req, ctx}) => {
   }
   url.pathname = REDIRECT_PATH
   url.search = ""
-  // TODO get host from env, not input
+
+  // Get user name
+  const payload = await checkJWTHeaders(env, req.headers)
+  if ((!payload) || (!payload.sub)) {
+    console.log(`Unable to fetch user from jwt`)
+    throw new Error(`unable to fetch user from jwt`)
+  }
 
   const client = initOAuth2Client(env, url.toString());
   const {tokens} = await client.getToken(code)
@@ -117,9 +138,7 @@ router.get(REDIRECT_PATH, async ({env, req, ctx}) => {
     })
 
   // spawn poller using ctx.waitUntil
-  // TODO
-  // https://developers.cloudflare.com/workers/runtime-apis/context/
-  ctx?.waitUntil(poller(response, tokens, env.PHOTO_BUCKET)) 
+  ctx?.waitUntil(poller(response, tokens, payload.sub, env)) 
 
   // Return picker URI redirect
   return Response.redirect(response.pickerUri)
@@ -127,7 +146,7 @@ router.get(REDIRECT_PATH, async ({env, req, ctx}) => {
 })
 
 async function poller(
-  sess: PickerSessionResp, tokens: Auth.Credentials, bucket: R2Bucket,
+  sess: PickerSessionResp, tokens: Auth.Credentials, user: string, env: Env,
 ) {
   const resp: PickerSessionResp = await fetch(
     `${GOOGLE_PHOTOPICKER_URL}/v1/sessions/${sess.id}`, {
@@ -147,17 +166,26 @@ async function poller(
   // User still picking, poll again
   if (!resp.mediaItemsSet) {
     // Wait until pollInterval set
+    // TODO add date, I'm not convinced this is correct
+    const sessionStatus = {
+      user: user,
+      text: "Waiting for photo picker to complete",
+      finished: false,
+      retry: false,
+    }
     console.log(`recursing in poller. Poll int: ${resp.pollingConfig.pollInterval}`)
+    await updateSessionStatus(env, sessionStatus)
+    // waiting on session
     return await new Promise(
       // seconds to ms
       r => setTimeout(r, parseInt(resp.pollingConfig.pollInterval) * 1000)
       // This is hacky and I don't understand promises
-    ).then(async () => { await poller(resp, tokens, bucket) })
+    ).then(async () => { await poller(resp, tokens, user, env) })
   }
 
   // User finished picking, run upload
-  var mediaItems = await fetchImages(sess, null, tokens)
-  return uploadImagesToCF(mediaItems, bucket, tokens)
+  var mediaItems = await fetchImages(sess, null, tokens, user, env)
+  return uploadImagesToCF(mediaItems, tokens, user, env)
 }
 
 interface PickerSessionResp  {
@@ -174,7 +202,11 @@ interface PollingConfig {
 }
 
 async function fetchImages(
-  sess:PickerSessionResp, pageToken:string | null, tokens: Auth.Credentials,
+  sess:PickerSessionResp,
+  pageToken:string | null,
+  tokens: Auth.Credentials,
+  user: string,
+  env: Env,
 ): Promise<PickedMediaItem[]> {
   var output = new Array<PickedMediaItem>
   var url = new URL(`${GOOGLE_PHOTOPICKER_URL}/v1/mediaItems`) 
@@ -200,7 +232,7 @@ async function fetchImages(
   output.push(...resp.mediaItems)
   if (resp.nextPageToken) {
     console.log("recursing fetchimage")
-    var mediaItems = await fetchImages(sess, resp.nextPageToken, tokens)
+    var mediaItems = await fetchImages(sess, resp.nextPageToken, tokens, user, env)
     output.push(...mediaItems)
   }
   return output
@@ -232,8 +264,10 @@ interface MediaItemsResp {
 }
 
 async function uploadImagesToCF(
-  mediaItems: PickedMediaItem[], bucket: R2Bucket,
+  mediaItems: PickedMediaItem[],
   tokens: Auth.Credentials,
+  user: string,
+  env: Env
 ) {
 
   // TODO strip exif info - needed anymore?
@@ -241,7 +275,13 @@ async function uploadImagesToCF(
   // https://www.npmjs.com/package/exifr
   for (const mediaItem of mediaItems) {
     const {width, height} = mediaItem.mediaFile.mediaFileMetadata
-    console.log(`fetching image ${mediaItem.mediaFile.filename}`)
+    const sessionStatus = {
+      user: user,
+      text: `Fetching image ${mediaItem.mediaFile.filename}`,
+      finished: false,
+      retry: false,
+    }
+    await updateSessionStatus(env, sessionStatus)
     const image = await fetch(
       mediaItem.mediaFile.baseUrl + `=w${width}-h${height}-d`, {
       method: 'GET',
@@ -251,23 +291,71 @@ async function uploadImagesToCF(
     });
     const bytes = await image.bytes();
 
-    await bucket.put(mediaItem.mediaFile.filename, bytes);
+    await env.PHOTO_BUCKET.put(mediaItem.mediaFile.filename, bytes);
   }
+  console.log("finished fetching all images") 
 }
 
-// Simple get
-router.get('/', ({req}) => {
-  var url = new URL(req.url)
-  url.pathname = '/login'
+// Custom type for updating session
+interface SessionStatus {
+  user: string,
+  text: string,
+  finished: boolean,
+  retry: boolean, //?
+}
 
+async function updateSessionStatus(
+  env: Env, status: SessionStatus,
+) {
+  console.log(`Will set status: ${status}`)
+  await env.SESSION_KV.put(status.user, JSON.stringify(status))
+}
+
+router.get('/check_status', async ({req, env}) => {
+  const payload = await checkJWTHeaders(env, req.headers)
+  if (!payload.sub) {
+    return new Response("JWT doens't contain sub", { status: 403 })
+  }
+
+  // could use `cf-access-authenticated-user-email` instead of jwt sub if I care
+  const status: SessionStatus | null = await env.SESSION_KV.get(payload.sub, "json")
+  if (!status) {
+    return new Response(
+      "No session exists for user", {
+        status: 404,
+      }
+    )
+  }
+
+  if (status.finished) {
+    await env.SESSION_KV.delete(payload.sub)
+  }
+
+  return Response.json(status)
+})
+
+// Simple get
+router.get('/', ({req, env}) => {
+  // Login
+  var baseURL = new URL(req.url)
+  baseURL.pathname = REDIRECT_PATH
+  var client = initOAuth2Client(env, baseURL.toString())
+
+  // Open new tab to google oauth login
+  // TODO to get session token, need to get data from redirect
+  // read-write to KV?
+  // need script in site to query kv for session status
+  /*
   return new Response(`<!DOCTYPE html>
 <body>
-  <a href=${url.toString()}>Upload</a></body>
+  <a target="_blank" rel="noopener noreferrer" href=${getOAuthClientUrl(client)}>Upload</a>
 </body>`, {
     headers: {
       "content-type": "text/html;charset=UTF-8",
     },
   })
+ */
+  return env.ASSETS.fetch('index.html')
 })
 
 
