@@ -2,10 +2,6 @@ import { Router } from '@tsndr/cloudflare-worker-router'
 import { google, Auth } from 'googleapis';
 import * as jose from 'jose'
 
-// TODO
-// [?] set exif metadata to download
-// [ ] how to handle motion pictures
-
 export interface Env {
   // oauth secrets
   CLIENT_ID: string;
@@ -325,9 +321,6 @@ async function uploadImageToCF(
   env: Env
 ) {
 
-  // TODO strip exif info - needed anymore?
-  // https://github.com/joshbuddy/exif-be-gone
-  // https://www.npmjs.com/package/exifr
   const {width, height} = mediaItem.mediaFile.mediaFileMetadata
   const sessionStatus = {
     user: user,
@@ -355,7 +348,8 @@ async function uploadImageToCF(
     retry: false,
   }
   await updateSessionStatus(env, uploadSessionStatus)
-  env.PHOTO_BUCKET.put(mediaItem.mediaFile.filename, bytes)
+  const fileName = `${mediaItem.createTime}-${mediaItem.mediaFile.filename}`
+  env.PHOTO_BUCKET.put(fileName, bytes)
     .catch( (err) => {
       console.log(`Unable to upload to bucket: ${err}`)
       throw err
@@ -400,7 +394,6 @@ router.get('/check_status', async ({req, env, ctx}) => {
   }
   const resp = checkStatusKey(payload.sub, env)
 
-  // TODO check sess and handle
   const sessKV: KVSessionSet | null = await env.SESSION_KV.get(
     `${SESSION_PREFIX}/${payload.sub}`, "json",
   )
