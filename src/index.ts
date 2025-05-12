@@ -23,7 +23,6 @@ const GOOGLE_PHOTOPICKER_URL = "https://photospicker.googleapis.com"
 const REDIRECT_PATH = '/oauth_callback'
 const CF_JWT_HEADER = 'cf-access-jwt-assertion'
 const SESSION_PREFIX = 'sessions'
-const STATUS_PREFIX = 'status_text'
 
 interface PickerSessionResp  {
   id: string,
@@ -64,13 +63,6 @@ enum MediaType {
 }
 
 // Custom type for updating session
-interface SessionStatus {
-  user: string,
-  text: string,
-  finished: boolean,
-  retry: boolean, //?
-}
-
 interface KVSessionSet {
   pickerSessionId: string,
   pickerSessionComplete: boolean,
@@ -202,34 +194,23 @@ router.get(REDIRECT_PATH, async ({env, req, ctx}) => {
 
 async function handleKVSessionSet(
    kvSess: KVSessionSet, env: Env,
-) {
+): Promise<string> {
   var resp = await getPickerSession(
     kvSess.pickerSessionId, kvSess.token, kvSess.user, env,
   )
   // if sess is not finished, exit early
   if (!resp.mediaItemsSet) {
     console.log(`Waiting in poller: ${new Date().toISOString()}`)
-    const sessionStatus = {
-      user: kvSess.user,
-      text: "Waiting for photo picker to complete",
-      finished: false,
-      retry: false,
-    }
-    await updateSessionStatus(env, sessionStatus)
-    return 
+    return "Waiting for photo picker to complete"
   }
 
   if (!kvSess.pickerSessionComplete) {
     // Session complete but KV doesn't think so
-    // update KV
+    // fetch baseURLs from resp, then update KV
     kvSess.pickerSessionComplete = resp.mediaItemsSet
-    await updateSessionKV(kvSess, env)
-  }
-
-  // if media isn't set in KV, fetch and save
-  if (kvSess.mediaItems.length == 0) {
     kvSess.mediaItems = await fetchImages(resp, null, kvSess.token, kvSess.user, env)
     await updateSessionKV(kvSess, env)
+    return "Picker session complete. Uploading photos"
   }
 
   while (kvSess.mediaItems.length > 0) {
@@ -241,9 +222,10 @@ async function handleKVSessionSet(
     await updateSessionKV(kvSess, env)
   }
 
-  // Delete KV if we made it this far (unlikely?)
+  // Delete KV if we made it this far (unlikely on first go)
   console.log(`Removing session for ${kvSess.user}`)
   await env.SESSION_KV.delete(`${SESSION_PREFIX}/${kvSess.user}`)
+  return "Upload completed successfully"
 }
 
 async function updateSessionKV(kvSess: KVSessionSet, env: Env) {
@@ -322,13 +304,6 @@ async function uploadImageToCF(
 ) {
 
   const {width, height} = mediaItem.mediaFile.mediaFileMetadata
-  const sessionStatus = {
-    user: user,
-    text: `Fetching image ${mediaItem.mediaFile.filename}`,
-    finished: false,
-    retry: false,
-  }
-  await updateSessionStatus(env, sessionStatus)
   const image = await fetch(
     mediaItem.mediaFile.baseUrl + `=w${width}-h${height}-d`, {
     method: 'GET',
@@ -341,13 +316,6 @@ async function uploadImageToCF(
   });
   const bytes = await image.bytes();
 
-  const uploadSessionStatus = {
-    user: user,
-    text: `Uploading image ${mediaItem.mediaFile.filename}`,
-    finished: false,
-    retry: false,
-  }
-  await updateSessionStatus(env, uploadSessionStatus)
   const fileName = `${mediaItem.createTime}-${mediaItem.mediaFile.filename}`
   env.PHOTO_BUCKET.put(fileName, bytes)
     .catch( (err) => {
@@ -357,53 +325,25 @@ async function uploadImageToCF(
   console.log("Uploaded image")
 }
 
-async function updateSessionStatus(
-  env: Env, status: SessionStatus,
-) {
-  console.log(`Will set status: ${JSON.stringify(status)}`)
-  await env.SESSION_KV.put(
-    `${STATUS_PREFIX}/${status.user}`, JSON.stringify(status),
-  ).catch((err) => {
-    console.log(err)
-    throw err
-  })
-}
-
-async function checkStatusKey(user:string, env:Env): Promise<Response> {
-  const status: SessionStatus | null = await env.SESSION_KV.get(`${SESSION_PREFIX}/${user}`, "json")
-  if (!status) {
-    return new Response(
-      "No session exists for user", {
-        status: 404,
-      }
-    )
-  }
-
-  if (status.finished) {
-    await env.SESSION_KV.delete(`${STATUS_PREFIX}/${user}`)
-  }
-
-  return Response.json(status)
-}
-
 router.get('/check_status', async ({req, env, ctx}) => {
   console.log("Checking status")
   const payload = await checkJWTHeaders(env, req.headers)
   if (!payload.sub) {
     return new Response("JWT doesn't contain sub", { status: 403 })
   }
-  const resp = checkStatusKey(payload.sub, env)
-
   const sessKV: KVSessionSet | null = await env.SESSION_KV.get(
     `${SESSION_PREFIX}/${payload.sub}`, "json",
   )
   if (!sessKV) {
     // session not set, we should return a 404 (from the status key not set)
-    return await resp
+    return new Response(
+      "No session exists for user", {
+        status: 404,
+      }
+    )
   }
-  ctx?.waitUntil(handleKVSessionSet(sessKV, env))
-
-  return await resp
+  const statusText = await handleKVSessionSet(sessKV, env)
+  return new Response(statusText)
 })
 
 router.get('/', ({req, env}) => {
