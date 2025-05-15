@@ -1,12 +1,22 @@
 <!DOCTYPE html>
-<head>
-  <script type="text/javascript" src="status.js"></script>
-</head>
-<body style="background-color:black">
-  <div id="status_text" style="color:white">
-  Click the button below to start an upload session
-  </div>
-  <div id="login_link">
-  <a target="_blank" rel="noopener noreferrer" style="color:white" href="/login">Upload</a>
-  </div>
-</body>
+<html lang="en">
+  <head>
+    <script type="text/javascript" src="status.js"></script>
+    <link rel="stylesheet" href="style.css" type="text/css"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  </head>
+  <body class="mx-auto flex max-w-md min-h-screen bg-black text-white text-lg">
+    <div class="grid gap-y-4 align-middle">
+      <div id="status_text" class="min-w-md text-center self-center text-2xl">
+      Click Upload below to start an upload session
+      </div>
+      <div class="grid grid-cols-2 align-middle">
+        <button class="outline outline-white bg-green-600 rounded px-2 max-h-10 justify-self-center self-center" 
+          onclick="window.open('/login','_blank');">Upload</button>
+        </form>
+        <button class="outline outline-white bg-red-600 rounded px-2 max-h-10 justify-self-center self-center" 
+          onclick="clearSession()">Logout</button>
+      </div>
+    </div>
+  </body>
+</html>

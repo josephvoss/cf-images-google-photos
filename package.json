@@ -7,7 +7,12 @@
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest",
-		"cf-typegen": "wrangler types"
+		"cf-typegen": "wrangler types",
+		"watch:css": "tailwindcss -i src/style.css -o static/style.css --watch",
+		"watch:cf": "wrangler dev",
+		"watch": "$npm_execpath run watch:cf & $npm_execpath run watch:css",
+		"build": "$npm_execpath run build:css",
+		"build:css": "tailwindcss -i src/style.css -o static/style.css"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.19",
@@ -18,5 +23,9 @@
 		"typescript": "^5.5.2",
 		"vitest": "~3.0.7",
 		"wrangler": "^4.14.3"
+	},
+	"dependencies": {
+		"@tailwindcss/cli": "^4.1.6",
+		"tailwindcss": "^4.1.6"
 	}
 }
