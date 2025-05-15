@@ -346,6 +346,18 @@ router.get('/check_status', async ({req, env, ctx}) => {
   return new Response(statusText)
 })
 
+router.get('/clear_session', async ({req, env, ctx}) => {
+  const payload = await checkJWTHeaders(env, req.headers)
+  if (!payload.sub) {
+    return new Response("JWT doesn't contain sub", { status: 403 })
+  }
+  await env.SESSION_KV.delete(
+    `${SESSION_PREFIX}/${payload.sub}`,
+  )
+
+  return new Response(`Cleared session for ${payload.email}`)
+})
+
 router.get('/', ({req, env}) => {
   // Login
   var baseURL = new URL(req.url)
