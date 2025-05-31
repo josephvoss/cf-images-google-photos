@@ -79,9 +79,9 @@ export type ExtReq = {
     url?: string
 }
 // Context Extension
-export type ExtCtx = {
-}
-const router = new Router<Env, ExtCtx, ExtReq>()
+//export type ExtCtx = {}
+//const router = new Router<Env, ExtCtx, ExtReq>()
+const router = new Router<Env, ExtReq>()
 
 async function checkJWTHeaders(env: Env, headers: Headers): Promise<jose.JWTPayload>{
   const token = headers.get(CF_JWT_HEADER)
@@ -100,8 +100,8 @@ async function checkJWTHeaders(env: Env, headers: Headers): Promise<jose.JWTPayl
 }
 
 // global middleware auth check
-router.use( ({ env, req }) => {
-  return checkJWTHeaders(env, req.headers)
+router.use( async ({ env, req }) => {
+  return await checkJWTHeaders(env, req.headers)
     .then( (payload) => {
       if (payload.aud != env.AUD_TAG) {
         return new Response("middleware: invalid jwt", {status: 403});
@@ -125,19 +125,19 @@ function getOAuthClientUrl(client: Auth.OAuth2Client): string {
   })
 }
 
-router.get('/login', async ({env, req}) => {
-  var baseURL = new URL(req.url)
+router.get('/login', ({env, req}) => {
+  const baseURL = new URL(req.url)
   baseURL.pathname = REDIRECT_PATH
-  var client = initOAuth2Client(env, baseURL.toString())
+  const client = initOAuth2Client(env, baseURL.toString())
   // Redirect to google oauth login
   return Response.redirect(getOAuthClientUrl(client))
 })
 
 
-router.get(REDIRECT_PATH, async ({env, req, ctx}) => {
+router.get(REDIRECT_PATH, async ({env, req}) => {
 
   // Get tokens
-  var url = new URL(req.url)
+  const url = new URL(req.url)
   const searchParams = new URLSearchParams(url.search)
   const code = searchParams.get("code")
   // TODO null check better, throw if null inline
@@ -195,8 +195,8 @@ router.get(REDIRECT_PATH, async ({env, req, ctx}) => {
 async function handleKVSessionSet(
    kvSess: KVSessionSet, env: Env,
 ): Promise<string> {
-  var resp = await getPickerSession(
-    kvSess.pickerSessionId, kvSess.token, kvSess.user, env,
+  const resp = await getPickerSession(
+    kvSess.pickerSessionId, kvSess.token,
   )
   // if sess is not finished, exit early
   if (!resp.mediaItemsSet) {
@@ -218,7 +218,7 @@ async function handleKVSessionSet(
     if (!media) {
       throw new Error("Trying to pop media returned err?")
     }
-    await uploadImageToCF(media, kvSess.token, kvSess.user, env)
+    await uploadImageToCF(media, kvSess.token, env)
     await updateSessionKV(kvSess, env)
   }
 
@@ -239,10 +239,10 @@ async function updateSessionKV(kvSess: KVSessionSet, env: Env) {
   })
 }
 
-function getPickerSession(
-  sessId: string, token: string, user: string, env: Env,
+async function getPickerSession(
+  sessId: string, token: string,
 ): Promise<PickerSessionResp> {
-  return fetch(
+  return await fetch(
     `${GOOGLE_PHOTOPICKER_URL}/v1/sessions/${sessId}`, {
       method: 'GET',
       headers: {
@@ -266,8 +266,8 @@ async function fetchImages(
   user: string,
   env: Env,
 ): Promise<PickedMediaItem[]> {
-  var output = new Array<PickedMediaItem>
-  var url = new URL(`${GOOGLE_PHOTOPICKER_URL}/v1/mediaItems`) 
+  const output = new Array<PickedMediaItem>
+  const url = new URL(`${GOOGLE_PHOTOPICKER_URL}/v1/mediaItems`) 
   url.searchParams.set("sessionId", sess.id)
   if (pageToken) {
     url.searchParams.set("pageToken", pageToken)
@@ -290,7 +290,7 @@ async function fetchImages(
   output.push(...resp.mediaItems)
   if (resp.nextPageToken) {
     console.log("recursing fetchimage")
-    var mediaItems = await fetchImages(sess, resp.nextPageToken, token, user, env)
+    const mediaItems = await fetchImages(sess, resp.nextPageToken, token, user, env)
     output.push(...mediaItems)
   }
   return output
@@ -299,7 +299,6 @@ async function fetchImages(
 async function uploadImageToCF(
   mediaItem: PickedMediaItem,
   token: string,
-  user: string,
   env: Env
 ) {
 
@@ -325,7 +324,7 @@ async function uploadImageToCF(
   console.log("Uploaded image")
 }
 
-router.get('/check_status', async ({req, env, ctx}) => {
+router.get('/check_status', async ({req, env}) => {
   console.log("Checking status")
   const payload = await checkJWTHeaders(env, req.headers)
   if (!payload.sub) {
@@ -346,7 +345,7 @@ router.get('/check_status', async ({req, env, ctx}) => {
   return new Response(statusText)
 })
 
-router.get('/clear_session', async ({req, env, ctx}) => {
+router.get('/clear_session', async ({req, env}) => {
   const payload = await checkJWTHeaders(env, req.headers)
   if (!payload.sub) {
     return new Response("JWT doesn't contain sub", { status: 403 })
@@ -358,11 +357,12 @@ router.get('/clear_session', async ({req, env, ctx}) => {
   return new Response(`Cleared session for ${payload.email}`)
 })
 
-router.get('/', ({req, env}) => {
-  // Login
-  var baseURL = new URL(req.url)
+router.get('/', ({env}) => {
+  /*// Login
+  const  baseURL = new URL(req.url)
   baseURL.pathname = REDIRECT_PATH
-  var client = initOAuth2Client(env, baseURL.toString())
+  const client = initOAuth2Client(env, baseURL.toString())
+   */
 
   console.log("Fetching index")
   return env.ASSETS.fetch('index.html')
@@ -370,7 +370,7 @@ router.get('/', ({req, env}) => {
 
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  fetch(request: Request, env: Env, ctx: ExecutionContext) {
     return router.handle(request, env, ctx)
   },
 } satisfies ExportedHandler<Env>;
