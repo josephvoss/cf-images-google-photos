@@ -60,6 +60,7 @@ interface MediaFile {
   mimeType: string,
   filename: string,
   mediaFileMetadata: { width: number, height: number }
+  description: string,
 }
 
 enum MediaType {
@@ -204,7 +205,14 @@ async function uploadImageToCF(
   const bytes = await image.bytes();
 
   const fileName = `${mediaItem.createTime}-${mediaItem.mediaFile.filename}`
-  env.PHOTO_BUCKET.put(fileName, bytes)
+  const putOpts: R2PutOptions = {
+    customMetadata: {
+      mimeType: mediaItem.mediaFile.mimeType,
+      createTime: mediaItem.createTime,
+      description: mediaItem.mediaFile.description,
+    }
+  }
+  env.PHOTO_BUCKET.put(fileName, bytes, putOpts)
     .catch( (err) => {
       console.log(`Unable to upload to bucket: ${err}`)
       throw err
