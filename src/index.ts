@@ -75,6 +75,7 @@ interface WorkflowParams {
   sessionId: string
   pollDuration: number
   token: string
+  exclusive: boolean
 }
 
 // router init and types
@@ -286,6 +287,7 @@ router.get(REDIRECT_PATH, async ({env, req}) => {
         response.pollingConfig.pollInterval,
       ),
       token: tokens.access_token,
+      exclusive: false,
     }
   })
   await env.SESSION_KV.put(payload.sub, workflow.id)
@@ -375,6 +377,45 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+class PhotoDiff {
+  Add: PickedMediaItem[] 
+  Del: string[] 
+
+  constructor() {
+    this.Add = [];
+    this.Del = [];
+  }
+  async init(
+    mediaList: PickedMediaItem[],
+    bucket: R2Bucket,
+  ) {
+
+    // List objs in buckeet
+    const options = { limit: 1000 }
+    const listed = await bucket.list(options)
+    let truncated = listed.truncated
+    let cursor = listed.truncated ? listed.cursor : undefined
+    while (truncated) {
+      const next = await bucket.list({
+        ...options,
+        cursor: cursor,
+      });
+      listed.objects.push(...next.objects);
+
+      truncated = next.truncated;
+      cursor = next.truncated ? next.cursor : undefined
+    }
+
+    // Build Add and Del members
+    const r2objKeys: string[] = listed.objects.map(obj => obj.key)
+    const mediaKeys: string[] = mediaList.map(i => i.id)
+    // Save mediaItems directly for add, but use mediaKeys array for checking
+    // if delete from R2
+    this.Add = mediaList.filter(i => !r2objKeys.includes(i.id))
+    this.Del = r2objKeys.filter(i => !mediaKeys.includes(i))
+  }
+}
+
 /*
  * User clicks login, redirected to google oauth
  * if successful, returns to callback
@@ -386,7 +427,7 @@ export default {
 // TODO save IDs to kv
 export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
 	override async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
-		const { sessionId, pollDuration, token } = event.payload;
+		const { sessionId, pollDuration, token, exclusive } = event.payload;
 
     // Don't return until picker session complete
 		const rPickSess: PickerSessionResp = await step.do(
@@ -419,10 +460,33 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
     )
 
     // Upload images to R2
-    for (const media of mediaItems) {
-      await step.do(`Uploading ${media.id} to R2`,
-        async () => await uploadImageToCF(media, token, this.env)
+    if (!exclusive) {
+      for (const media of mediaItems) {
+        await step.do(`Uploading ${media.id} to R2`,
+          async () => await uploadImageToCF(media, token, this.env)
+        )
+      }
+    } else {
+      const photoDiff: PhotoDiff = await step.do(
+        "Build PhotosDiff",
+        async () => {
+          const photoDiff = new PhotoDiff()
+          await photoDiff.init(mediaItems, this.env.PHOTO_BUCKET)
+          return photoDiff
+        }
       )
+
+      for (const delItem of photoDiff.Del) {
+        await step.do(`Removing ${delItem} from R2`,
+          async () => await this.env.PHOTO_BUCKET.delete(delItem)
+        )
+      }
+
+      for (const addItem of photoDiff.Add) {
+        await step.do(`Adding ${addItem.id} from R2`,
+          async () => await uploadImageToCF(addItem, token, this.env)
+        )
+      }
     }
 
     return "Upload complete"
