@@ -155,7 +155,7 @@ async function fetchImages(
   token: string,
 ): Promise<PickedMediaItem[]> {
   const output = new Array<PickedMediaItem>
-  const url = new URL(`${GOOGLE_PHOTOPICKER_URL}/v1/mediaItems`) 
+  const url = new URL(`${GOOGLE_PHOTOPICKER_URL}/v1/mediaItems`)
   url.searchParams.set("sessionId", sess.id)
   if (pageToken) {
     url.searchParams.set("pageToken", pageToken)
@@ -404,7 +404,7 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
       // Session complete, return
       return pickerSess
     })
-    
+
     const mediaItems: PickedMediaItem[] = await step.do(
       "Fetch media from gphotos",
       async () => { return await fetchImages(rPickSess, null, token) }
