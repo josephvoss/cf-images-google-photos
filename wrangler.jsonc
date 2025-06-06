@@ -24,5 +24,12 @@
       "binding": "SESSION_KV",
       "id": "c303a954cc304d3abd636e1b3a98fd02"
     }
+  ],
+  "workflows": [
+    {
+      "name": "photo-uploader",
+      "binding": "UPLOAD_WORKFLOW",
+      "class_name": "PhotoUpload"
+    }
   ]
 }

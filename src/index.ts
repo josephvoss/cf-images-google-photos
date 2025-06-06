@@ -1,8 +1,18 @@
 import { Router } from '@tsndr/cloudflare-worker-router'
-import { google, Auth } from 'googleapis';
+import { google, Auth } from 'googleapis'
 import * as jose from 'jose'
 
-export interface Env {
+import {
+  WorkflowEntrypoint,
+  WorkflowStep,
+  WorkflowEvent
+} from 'cloudflare:workers'
+
+const GOOGLE_PHOTOPICKER_URL = "https://photospicker.googleapis.com"
+const REDIRECT_PATH = '/oauth_callback'
+const CF_JWT_HEADER = 'cf-access-jwt-assertion'
+
+interface Env {
   // oauth secrets
   CLIENT_ID: string;
   CLIENT_SECRET: string;
@@ -17,12 +27,8 @@ export interface Env {
   PHOTO_BUCKET: R2Bucket;
   ASSETS: Fetcher;
   SESSION_KV: KVNamespace;
+  UPLOAD_WORKFLOW: Workflow;
 }
-
-const GOOGLE_PHOTOPICKER_URL = "https://photospicker.googleapis.com"
-const REDIRECT_PATH = '/oauth_callback'
-const CF_JWT_HEADER = 'cf-access-jwt-assertion'
-const SESSION_PREFIX = 'sessions'
 
 interface PickerSessionResp  {
   id: string,
@@ -62,14 +68,12 @@ enum MediaType {
   VIDEO,
 }
 
-// Custom type for updating session
-interface KVSessionSet {
-  pickerSessionId: string,
-  pickerSessionComplete: boolean,
-  // Don't bother with refresh, if this takes more than an hour we have a problem
-  token: string,
-  user: string,
-  mediaItems: PickedMediaItem[]
+// Custom workflow types
+// Workflow related types
+interface WorkflowParams {
+  sessionId: string
+  pollDuration: number
+  token: string
 }
 
 // router init and types
@@ -125,6 +129,96 @@ function getOAuthClientUrl(client: Auth.OAuth2Client): string {
   })
 }
 
+async function getPickerSession(
+  sessId: string, token: string,
+): Promise<PickerSessionResp> {
+  return await fetch(
+    `${GOOGLE_PHOTOPICKER_URL}/v1/sessions/${sessId}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token
+      },
+    }).then((response) => {
+      if (!response.ok) {
+        console.log(`Error fetching session: ${response.status}`);
+        throw new Error(`Error fetching session: ${response.status}`)
+      } else {
+        return response.json()
+      }
+    })
+}
+
+async function fetchImages(
+  sess:PickerSessionResp,
+  pageToken:string | null,
+  token: string,
+): Promise<PickedMediaItem[]> {
+  const output = new Array<PickedMediaItem>
+  const url = new URL(`${GOOGLE_PHOTOPICKER_URL}/v1/mediaItems`) 
+  url.searchParams.set("sessionId", sess.id)
+  if (pageToken) {
+    url.searchParams.set("pageToken", pageToken)
+  }
+  const resp: MediaItemsResp = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token
+      },
+    }).then((response) => {
+      if (!response.ok) {
+        console.log(`Error fetching media items: ${response.status}`);
+        throw new Error(`Error fetching media items: ${response.status}`)
+      } else {
+        return response.json()
+      }
+    })
+
+  output.push(...resp.mediaItems)
+  if (resp.nextPageToken) {
+    console.log("recursing fetchimage")
+    const mediaItems = await fetchImages(sess, resp.nextPageToken, token)
+    output.push(...mediaItems)
+  }
+  return output
+}
+
+async function uploadImageToCF(
+  mediaItem: PickedMediaItem,
+  token: string,
+  env: Env
+) {
+
+  const {width, height} = mediaItem.mediaFile.mediaFileMetadata
+  const image = await fetch(
+    mediaItem.mediaFile.baseUrl + `=w${width}-h${height}-d`, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  }).catch( (err) => {
+    console.log(`Unable to fetch baseurl: ${err}`)
+    throw err
+  });
+  const bytes = await image.bytes();
+
+  const fileName = `${mediaItem.createTime}-${mediaItem.mediaFile.filename}`
+  env.PHOTO_BUCKET.put(fileName, bytes)
+    .catch( (err) => {
+      console.log(`Unable to upload to bucket: ${err}`)
+      throw err
+    })
+  console.log("Uploaded image")
+}
+
+// Format google's picker api poll duration to something workflow can use
+function pollIntervalToWorkflowDuration(input: string): number {
+  // Input format is fractional seconds suffixed w/ `s`
+  // Output is either milliseconds or human readable (not fractional) `1 second`
+  return Number(input.slice(0, -1)) * 1000
+}
+
 router.get('/login', ({env, req}) => {
   const baseURL = new URL(req.url)
   baseURL.pathname = REDIRECT_PATH
@@ -133,9 +227,7 @@ router.get('/login', ({env, req}) => {
   return Response.redirect(getOAuthClientUrl(client))
 })
 
-
 router.get(REDIRECT_PATH, async ({env, req}) => {
-
   // Get tokens
   const url = new URL(req.url)
   const searchParams = new URLSearchParams(url.search)
@@ -178,151 +270,23 @@ router.get(REDIRECT_PATH, async ({env, req}) => {
       }
     })
 
-  // Upload session info
-  await updateSessionKV({
-    pickerSessionId: response.id,
-    pickerSessionComplete: false,
-    token: tokens.access_token!,
-    user: payload.sub,
-    mediaItems: [],
-  }, env)
+  // Start upload workflow, save id under payload.sub
+  const workflow = await env.UPLOAD_WORKFLOW.create({
+    params: {
+      sessionId: response.id,
+      pollDuration: pollIntervalToWorkflowDuration(
+        response.pollingConfig.pollInterval,
+      ),
+      token: tokens.access_token,
+    }
+  })
+  await env.SESSION_KV.put(payload.sub, workflow.id)
 
   // Return picker URI redirect
+  // why? I guess this is to google so it doesn't matter
   return Response.redirect(response.pickerUri)
 
 })
-
-async function handleKVSessionSet(
-   kvSess: KVSessionSet, env: Env,
-): Promise<string> {
-  const resp = await getPickerSession(
-    kvSess.pickerSessionId, kvSess.token,
-  )
-  // if sess is not finished, exit early
-  if (!resp.mediaItemsSet) {
-    console.log(`Waiting in poller: ${new Date().toISOString()}`)
-    return "Waiting for photo picker to complete"
-  }
-
-  if (!kvSess.pickerSessionComplete) {
-    // Session complete but KV doesn't think so
-    // fetch baseURLs from resp, then update KV
-    kvSess.pickerSessionComplete = resp.mediaItemsSet
-    kvSess.mediaItems = await fetchImages(resp, null, kvSess.token, kvSess.user, env)
-    await updateSessionKV(kvSess, env)
-    return "Picker session complete. Uploading photos"
-  }
-
-  while (kvSess.mediaItems.length > 0) {
-    const media = kvSess.mediaItems.pop()
-    if (!media) {
-      throw new Error("Trying to pop media returned err?")
-    }
-    await uploadImageToCF(media, kvSess.token, env)
-    await updateSessionKV(kvSess, env)
-  }
-
-  // Delete KV if we made it this far (unlikely on first go)
-  console.log(`Removing session for ${kvSess.user}`)
-  await env.SESSION_KV.delete(`${SESSION_PREFIX}/${kvSess.user}`)
-  return "Upload completed successfully"
-}
-
-async function updateSessionKV(kvSess: KVSessionSet, env: Env) {
-  console.log(`Updating session KV: ${JSON.stringify(kvSess)}`)
-  await env.SESSION_KV.put(
-    `${SESSION_PREFIX}/${kvSess.user}`,
-    JSON.stringify(kvSess),
-  ).catch( (err) => {
-    console.log(`Unable to update kv sess: ${err}`)
-    throw err
-  })
-}
-
-async function getPickerSession(
-  sessId: string, token: string,
-): Promise<PickerSessionResp> {
-  return await fetch(
-    `${GOOGLE_PHOTOPICKER_URL}/v1/sessions/${sessId}`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + token
-      },
-    }).then((response) => {
-      if (!response.ok) {
-        console.log(`Error fetching session: ${response.status}`);
-        throw new Error(`Error fetching session: ${response.status}`)
-      } else {
-        return response.json()
-      }
-    })
-}
-
-async function fetchImages(
-  sess:PickerSessionResp,
-  pageToken:string | null,
-  token: string,
-  user: string,
-  env: Env,
-): Promise<PickedMediaItem[]> {
-  const output = new Array<PickedMediaItem>
-  const url = new URL(`${GOOGLE_PHOTOPICKER_URL}/v1/mediaItems`) 
-  url.searchParams.set("sessionId", sess.id)
-  if (pageToken) {
-    url.searchParams.set("pageToken", pageToken)
-  }
-  const resp: MediaItemsResp = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + token
-      },
-    }).then((response) => {
-      if (!response.ok) {
-        console.log(`Error fetching media items: ${response.status}`);
-        throw new Error(`Error fetching media items: ${response.status}`)
-      } else {
-        return response.json()
-      }
-    })
-
-  output.push(...resp.mediaItems)
-  if (resp.nextPageToken) {
-    console.log("recursing fetchimage")
-    const mediaItems = await fetchImages(sess, resp.nextPageToken, token, user, env)
-    output.push(...mediaItems)
-  }
-  return output
-}
-
-async function uploadImageToCF(
-  mediaItem: PickedMediaItem,
-  token: string,
-  env: Env
-) {
-
-  const {width, height} = mediaItem.mediaFile.mediaFileMetadata
-  const image = await fetch(
-    mediaItem.mediaFile.baseUrl + `=w${width}-h${height}-d`, {
-    method: 'GET',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-    },
-  }).catch( (err) => {
-    console.log(`Unable to fetch baseurl: ${err}`)
-    throw err
-  });
-  const bytes = await image.bytes();
-
-  const fileName = `${mediaItem.createTime}-${mediaItem.mediaFile.filename}`
-  env.PHOTO_BUCKET.put(fileName, bytes)
-    .catch( (err) => {
-      console.log(`Unable to upload to bucket: ${err}`)
-      throw err
-    })
-  console.log("Uploaded image")
-}
 
 router.get('/check_status', async ({req, env}) => {
   console.log("Checking status")
@@ -330,19 +294,39 @@ router.get('/check_status', async ({req, env}) => {
   if (!payload.sub) {
     return new Response("JWT doesn't contain sub", { status: 403 })
   }
-  const sessKV: KVSessionSet | null = await env.SESSION_KV.get(
-    `${SESSION_PREFIX}/${payload.sub}`, "json",
-  )
-  if (!sessKV) {
-    // session not set, we should return a 404 (from the status key not set)
+
+  const workflowID = await env.SESSION_KV.get(payload.sub)
+  if (!workflowID) {
     return new Response(
-      "No session exists for user", {
+      "No workflow exists for user", {
         status: 404,
       }
     )
   }
-  const statusText = await handleKVSessionSet(sessKV, env)
-  return new Response(statusText)
+
+  const workflow = await env.UPLOAD_WORKFLOW.get(workflowID)
+  if (!workflow) {
+    // session not set, we should return a 404 (from the status key not set)
+    return new Response(
+      "No workflow exists for user", {
+        status: 404,
+      }
+    )
+  }
+
+  const status = await workflow.status()
+  let output = ""
+  switch (status.status) {
+    case "running":
+      output = `Upload is ${status.status}`
+      break
+    case "complete":
+      output = `Upload is ${status.status}`
+      break
+    default:
+      output = JSON.stringify(status)
+  }
+  return new Response(output)
 })
 
 router.get('/clear_session', async ({req, env}) => {
@@ -350,27 +334,89 @@ router.get('/clear_session', async ({req, env}) => {
   if (!payload.sub) {
     return new Response("JWT doesn't contain sub", { status: 403 })
   }
-  await env.SESSION_KV.delete(
-    `${SESSION_PREFIX}/${payload.sub}`,
-  )
 
+  const workflowID = await env.SESSION_KV.get(payload.sub)
+  if (!workflowID) {
+    return new Response(
+      "No workflow exists for user", {
+        status: 404,
+      }
+    )
+  }
+  const workflow = await env.UPLOAD_WORKFLOW.get(workflowID)
+  if (!workflow) {
+    return new Response(
+      "No workflow exists for user", {
+        status: 404,
+      }
+    )
+  }
+  workflow.terminate()
+  env.SESSION_KV.delete(payload.sub)
   return new Response(`Cleared session for ${payload.email}`)
 })
 
 router.get('/', ({env}) => {
-  /*// Login
-  const  baseURL = new URL(req.url)
-  baseURL.pathname = REDIRECT_PATH
-  const client = initOAuth2Client(env, baseURL.toString())
-   */
-
   console.log("Fetching index")
   return env.ASSETS.fetch('index.html')
 })
-
 
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext) {
     return router.handle(request, env, ctx)
   },
 } satisfies ExportedHandler<Env>;
+
+/*
+ * User clicks login, redirected to google oauth
+ * if successful, returns to callback
+ * callback sets session in KV, starts workflow
+ * Workflow
+ *  polls session kv
+ *  when done, uploads photos
+ */
+// TODO save IDs to kv
+export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
+	override async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
+		const { sessionId, pollDuration, token } = event.payload;
+
+    // Don't return until picker session complete
+		const rPickSess: PickerSessionResp = await step.do(
+      'Poll picker session',
+      {
+        retries: {
+          limit: Infinity,
+          delay: pollDuration,
+          backoff: "constant",
+        },
+        // set? default to 24hr
+        timeout: "10 minutes",
+      }, async () => {
+
+      const pickerSess = await getPickerSession(
+        sessionId, token,
+      )
+      if (!pickerSess.mediaItemsSet) {
+        console.log(`Waiting in poller: ${new Date().toISOString()}`)
+        // error and rely on retry
+        throw new Error("Waiting for picker session")
+      }
+      // Session complete, return
+      return pickerSess
+    })
+    
+    const mediaItems: PickedMediaItem[] = await step.do(
+      "Fetch media from gphotos",
+      async () => { return await fetchImages(rPickSess, null, token) }
+    )
+
+    // Upload images to R2
+    for (const media of mediaItems) {
+      await step.do(`Uploading ${media.id} to R2`,
+        async () => await uploadImageToCF(media, token, this.env)
+      )
+    }
+
+    return "Upload complete"
+	}
+}

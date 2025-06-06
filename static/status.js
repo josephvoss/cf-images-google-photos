@@ -31,8 +31,8 @@ function clearSession() {
 }
 
 // I don't understand promises
-var sleep = duration => new Promise(resolve => setTimeout(resolve, duration))
-var poll = (promiseFn, duration) => promiseFn().then(
+const sleep = duration => new Promise(resolve => setTimeout(resolve, duration))
+const poll = (promiseFn, duration) => promiseFn().then(
   sleep(duration).then(() => poll(promiseFn, duration)))
 checkStatus()
 // Run checkStatus every 5 sec
