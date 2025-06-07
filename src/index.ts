@@ -483,23 +483,24 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
         await Promise.all(promises)
       })
     } else {
-      const photoDiff: PhotoDiff = await step.do(
+      // TODO this object does not support serialization
+      const {addList, delList} = await step.do(
         "Build PhotosDiff",
         async () => {
           const photoDiff = new PhotoDiff()
           await photoDiff.init(mediaItems, this.env.PHOTO_BUCKET)
-          return photoDiff
+          return {addList: photoDiff.Add, delList: photoDiff.Del}
         }
       )
 
       await step.do(`Removing old images from R2`, async () => {
-        for (const delItem of photoDiff.Del) {
+        for (const delItem of delList) {
             await this.env.PHOTO_BUCKET.delete(delItem)
         }
       })
 
       await step.do(`Adding new images to R2`, async () => {
-        for (const addItem of photoDiff.Add) {
+        for (const addItem of addList) {
             await uploadImageToCF(addItem, token, this.env)
         }
       })
