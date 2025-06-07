@@ -355,14 +355,15 @@ router.get('/clear_session', async ({req, env}) => {
   }
   const workflow = await env.UPLOAD_WORKFLOW.get(workflowID)
   if (!workflow) {
+    await env.SESSION_KV.delete(payload.sub)
     return new Response(
       "No workflow exists for user", {
         status: 404,
       }
     )
   }
-  workflow.terminate()
-  env.SESSION_KV.delete(payload.sub)
+  await workflow.terminate()
+  await env.SESSION_KV.delete(payload.sub)
   return new Response(`Cleared session for ${payload.email}`)
 })
 
@@ -461,11 +462,11 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
 
     // Upload images to R2
     if (!exclusive) {
-      for (const media of mediaItems) {
-        await step.do(`Uploading ${media.id} to R2`,
-          async () => await uploadImageToCF(media, token, this.env)
-        )
-      }
+      await step.do(`Adding new images to R2`, async () => {
+        for (const media of mediaItems) {
+            await uploadImageToCF(media, token, this.env)
+        }
+      })
     } else {
       const photoDiff: PhotoDiff = await step.do(
         "Build PhotosDiff",
@@ -476,17 +477,17 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
         }
       )
 
-      for (const delItem of photoDiff.Del) {
-        await step.do(`Removing ${delItem} from R2`,
-          async () => await this.env.PHOTO_BUCKET.delete(delItem)
-        )
-      }
+      await step.do(`Removing old images from R2`, async () => {
+        for (const delItem of photoDiff.Del) {
+            await this.env.PHOTO_BUCKET.delete(delItem)
+        }
+      })
 
-      for (const addItem of photoDiff.Add) {
-        await step.do(`Adding ${addItem.id} from R2`,
-          async () => await uploadImageToCF(addItem, token, this.env)
-        )
-      }
+      await step.do(`Adding new images to R2`, async () => {
+        for (const addItem of photoDiff.Add) {
+            await uploadImageToCF(addItem, token, this.env)
+        }
+      })
     }
 
     return "Upload complete"
