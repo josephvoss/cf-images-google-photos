@@ -15,7 +15,8 @@
   "r2_buckets": [
     {
       "binding": "PHOTO_BUCKET",
-      "bucket_name": "test-luca-images"
+      //"bucket_name": "luca-images"
+      "bucket_name": "luca-images-exclusive"
     }
   ],
 	"assets": { "directory": "./static/", "binding": "ASSETS" },
@@ -30,6 +31,11 @@
       "name": "photo-uploader",
       "binding": "UPLOAD_WORKFLOW",
       "class_name": "PhotoUpload"
+    },
+    {
+      "name": "child-photo-uploader",
+      "binding": "CHILD_WORKFLOW",
+      "class_name": "PhotoUploadChild"
     }
   ]
 }

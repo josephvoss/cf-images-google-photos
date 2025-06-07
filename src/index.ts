@@ -288,7 +288,7 @@ router.get(REDIRECT_PATH, async ({env, req}) => {
         response.pollingConfig.pollInterval,
       ),
       token: tokens.access_token,
-      exclusive: false,
+      exclusive: true,
     }
   })
   await env.SESSION_KV.put(payload.sub, workflow.id)
