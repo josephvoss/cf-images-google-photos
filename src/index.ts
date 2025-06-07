@@ -28,6 +28,7 @@ interface Env {
   ASSETS: Fetcher;
   SESSION_KV: KVNamespace;
   UPLOAD_WORKFLOW: Workflow;
+  CHILD_WORKFLOW: Workflow;
 }
 
 interface PickerSessionResp  {
@@ -463,9 +464,23 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
     // Upload images to R2
     if (!exclusive) {
       await step.do(`Adding new images to R2`, async () => {
-        for (const media of mediaItems) {
-            await uploadImageToCF(media, token, this.env)
+        const childWorkflows = []
+        const chunkSize = 45;
+        for (let i = 0; i < mediaItems.length; i += chunkSize) {
+            const chunk = mediaItems.slice(i, i + chunkSize);
+            const childWorkflow = await this.env.CHILD_WORKFLOW.create({params:{token: token, mediaItems: chunk}})
+            childWorkflows.push(childWorkflow)
         }
+        // TODO wait until child workflow is complete
+        const poll = async (childInstance: WorkflowInstance) => {
+          if (await childInstance.status().then(r => r.status) == "complete") {
+            return
+          } else setTimeout(_ => poll(childInstance), 1000);
+        }
+        const promises = childWorkflows.map(
+          (child) => new Promise(() => poll(child))
+        )
+        await Promise.all(promises)
       })
     } else {
       const photoDiff: PhotoDiff = await step.do(
@@ -491,5 +506,25 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
     }
 
     return "Upload complete"
+	}
+}
+
+interface ChildWorkflowParams {
+  token: string
+  mediaItems: PickedMediaItem[]
+}
+
+export class PhotoUploadChild extends WorkflowEntrypoint<Env, ChildWorkflowParams> {
+	override async run(event: WorkflowEvent<ChildWorkflowParams>, step: WorkflowStep) {
+
+		const { mediaItems, token } = event.payload;
+
+    for (const media of mediaItems) {
+      await step.do(`Adding new images to R2`, async () => {
+          await uploadImageToCF(media, token, this.env)
+      })
+    }
+
+    return 
 	}
 }

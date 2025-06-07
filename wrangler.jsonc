@@ -15,7 +15,7 @@
   "r2_buckets": [
     {
       "binding": "PHOTO_BUCKET",
-      "bucket_name": "luca-images"
+      "bucket_name": "test-luca-images"
     }
   ],
 	"assets": { "directory": "./static/", "binding": "ASSETS" },
