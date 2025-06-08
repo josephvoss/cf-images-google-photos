@@ -288,7 +288,7 @@ router.get(REDIRECT_PATH, async ({env, req}) => {
         response.pollingConfig.pollInterval,
       ),
       token: tokens.access_token,
-      exclusive: true,
+      exclusive: false,
     }
   })
   await env.SESSION_KV.put(payload.sub, workflow.id)
@@ -463,24 +463,36 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
 
     // Upload images to R2
     if (!exclusive) {
-      await step.do(`Adding new images to R2`, async () => {
+      const childWorkflows = await step.do(
+        `Spawning workflows for upload`, async () => {
         const childWorkflows = []
         const chunkSize = 45;
         for (let i = 0; i < mediaItems.length; i += chunkSize) {
             const chunk = mediaItems.slice(i, i + chunkSize);
             const childWorkflow = await this.env.CHILD_WORKFLOW.create({params:{token: token, mediaItems: chunk}})
-            childWorkflows.push(childWorkflow)
+            childWorkflows.push(childWorkflow.id)
         }
+        return childWorkflows
+      })
+
+      await step.do(`Wait for uploads to finish`, async () => {
         // TODO wait until child workflow is complete
         const poll = async (childInstance: WorkflowInstance) => {
           if (await childInstance.status().then(r => r.status) == "complete") {
             return
-          } else setTimeout(_ => poll(childInstance), 1000);
+          } else setTimeout(_ => poll(childInstance), 500);
         }
-        const promises = childWorkflows.map(
-          (child) => new Promise(() => poll(child))
+
+        const workflows = childWorkflows.map(
+          async (child) => {
+            const workflow = await this.env.CHILD_WORKFLOW.get(child)
+            if (!workflow) {
+              return
+            }
+            new Promise(() => poll(workflow))
+          }
         )
-        await Promise.all(promises)
+        await Promise.all(workflows)
       })
     } else {
       // TODO this object does not support serialization
@@ -492,8 +504,8 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
           return {addList: photoDiff.Add, delList: photoDiff.Del}
         }
       )
-
-      await step.do(`Removing old images from R2`, async () => {
+ 
+      await step.do(`Delete old images from R2`, async () => {
         for (const delItem of delList) {
             await this.env.PHOTO_BUCKET.delete(delItem)
         }
