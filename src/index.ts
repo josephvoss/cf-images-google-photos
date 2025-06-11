@@ -475,25 +475,27 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
         return childWorkflows
       })
 
-      await step.do(`Wait for uploads to finish`, async () => {
-        // TODO wait until child workflow is complete
-        const poll = async (childInstance: WorkflowInstance) => {
-          if (await childInstance.status().then(r => r.status) == "complete") {
-            return
-          } else setTimeout(_ => poll(childInstance), 500);
-        }
-
-        const workflows = childWorkflows.map(
-          async (child) => {
-            const workflow = await this.env.CHILD_WORKFLOW.get(child)
-            if (!workflow) {
-              return
-            }
-            new Promise(() => poll(workflow))
+    await step.do(`Wait for uploads to finish`, {
+        retries: {
+          limit: 3,
+          delay: "5 seconds",
+          backoff: "constant",
+        },
+        timeout: "5 minutes",
+      }, async () => {
+        for (const child of childWorkflows) {
+          const workflow = await this.env.CHILD_WORKFLOW.get(child)
+          if (!workflow) {
+            console.log("workflow not started")
           }
-        )
-        await Promise.all(workflows)
-      })
+          let cStatus = await workflow.status()
+          while (cStatus.status != "complete") {
+            await new Promise(resolve => { setTimeout(resolve, 2000) })
+            cStatus = await workflow.status()
+          }
+        }
+      }
+    )
     } else {
       // TODO this object does not support serialization
       const {addList, delList} = await step.do(
