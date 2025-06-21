@@ -214,12 +214,12 @@ async function uploadImageToCF(
       description: mediaItem.mediaFile.description,
     }
   }
-  env.PHOTO_BUCKET.put(fileName, bytes, putOpts)
+  await env.PHOTO_BUCKET.put(fileName, bytes, putOpts)
     .catch( (err) => {
       console.log(`Unable to upload to bucket: ${err}`)
       throw err
     })
-  console.log("Uploaded image")
+  console.log(`Uploaded image ${fileName}`)
 }
 
 // Format google's picker api poll duration to something workflow can use
@@ -462,18 +462,17 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
     )
 
     // Upload images to R2
-    if (!exclusive) {
-      const childWorkflows = await step.do(
-        `Spawning workflows for upload`, async () => {
-        const childWorkflows = []
-        const chunkSize = 45;
-        for (let i = 0; i < mediaItems.length; i += chunkSize) {
-            const chunk = mediaItems.slice(i, i + chunkSize);
-            const childWorkflow = await this.env.CHILD_WORKFLOW.create({params:{token: token, mediaItems: chunk}})
-            childWorkflows.push(childWorkflow.id)
-        }
-        return childWorkflows
-      })
+    const childWorkflows = await step.do(
+      `Spawning workflows for upload`, async () => {
+      const childWorkflows = []
+      const chunkSize = 45;
+      for (let i = 0; i < mediaItems.length; i += chunkSize) {
+          const chunk = mediaItems.slice(i, i + chunkSize);
+          const childWorkflow = await this.env.CHILD_WORKFLOW.create({params:{token: token, mediaItems: chunk}})
+          childWorkflows.push(childWorkflow.id)
+      }
+      return childWorkflows
+    })
 
     await step.do(`Wait for uploads to finish`, {
         retries: {
@@ -496,29 +495,6 @@ export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
         }
       }
     )
-    } else {
-      // TODO this object does not support serialization
-      const {addList, delList} = await step.do(
-        "Build PhotosDiff",
-        async () => {
-          const photoDiff = new PhotoDiff()
-          await photoDiff.init(mediaItems, this.env.PHOTO_BUCKET)
-          return {addList: photoDiff.Add, delList: photoDiff.Del}
-        }
-      )
- 
-      await step.do(`Delete old images from R2`, async () => {
-        for (const delItem of delList) {
-            await this.env.PHOTO_BUCKET.delete(delItem)
-        }
-      })
-
-      await step.do(`Adding new images to R2`, async () => {
-        for (const addItem of addList) {
-            await uploadImageToCF(addItem, token, this.env)
-        }
-      })
-    }
 
     return "Upload complete"
 	}
