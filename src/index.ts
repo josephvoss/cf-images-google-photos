@@ -76,7 +76,6 @@ interface WorkflowParams {
   sessionId: string
   pollDuration: number
   token: string
-  exclusive: boolean
 }
 
 // router init and types
@@ -288,7 +287,6 @@ router.get(REDIRECT_PATH, async ({env, req}) => {
         response.pollingConfig.pollInterval,
       ),
       token: tokens.access_token,
-      exclusive: false,
     }
   })
   await env.SESSION_KV.put(payload.sub, workflow.id)
@@ -356,14 +354,17 @@ router.get('/clear_session', async ({req, env}) => {
   }
   const workflow = await env.UPLOAD_WORKFLOW.get(workflowID)
   if (!workflow) {
-    await env.SESSION_KV.delete(payload.sub)
     return new Response(
       "No workflow exists for user", {
         status: 404,
       }
     )
   }
-  await workflow.terminate()
+  // Check if it's still running
+  const status = await workflow.status()
+  if (status.status == "running") {
+    await workflow.terminate()
+  }
   await env.SESSION_KV.delete(payload.sub)
   return new Response(`Cleared session for ${payload.email}`)
 })
@@ -379,45 +380,6 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-class PhotoDiff {
-  Add: PickedMediaItem[] 
-  Del: string[] 
-
-  constructor() {
-    this.Add = [];
-    this.Del = [];
-  }
-  async init(
-    mediaList: PickedMediaItem[],
-    bucket: R2Bucket,
-  ) {
-
-    // List objs in buckeet
-    const options = { limit: 1000 }
-    const listed = await bucket.list(options)
-    let truncated = listed.truncated
-    let cursor = listed.truncated ? listed.cursor : undefined
-    while (truncated) {
-      const next = await bucket.list({
-        ...options,
-        cursor: cursor,
-      });
-      listed.objects.push(...next.objects);
-
-      truncated = next.truncated;
-      cursor = next.truncated ? next.cursor : undefined
-    }
-
-    // Build Add and Del members
-    const r2objKeys: string[] = listed.objects.map(obj => obj.key)
-    const mediaKeys: string[] = mediaList.map(i => i.id)
-    // Save mediaItems directly for add, but use mediaKeys array for checking
-    // if delete from R2
-    this.Add = mediaList.filter(i => !r2objKeys.includes(i.id))
-    this.Del = r2objKeys.filter(i => !mediaKeys.includes(i))
-  }
-}
-
 /*
  * User clicks login, redirected to google oauth
  * if successful, returns to callback
@@ -429,7 +391,7 @@ class PhotoDiff {
 // TODO save IDs to kv
 export class PhotoUpload extends WorkflowEntrypoint<Env, WorkflowParams> {
 	override async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
-		const { sessionId, pollDuration, token, exclusive } = event.payload;
+		const { sessionId, pollDuration, token } = event.payload;
 
     // Don't return until picker session complete
 		const rPickSess: PickerSessionResp = await step.do(
